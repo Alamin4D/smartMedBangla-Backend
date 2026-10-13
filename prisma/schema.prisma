@@ -1,0 +1,435 @@
+// SmartMed database schema (PostgreSQL + Prisma v7)
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ───────────────────────────── Enums ─────────────────────────────
+
+enum Role {
+  PATIENT
+  CAREGIVER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum Plan {
+  FREE
+  PREMIUM
+}
+
+enum Language {
+  bn
+  en
+}
+
+enum OtpPurpose {
+  EMAIL_VERIFY
+  PASSWORD_RESET
+}
+
+enum CareLinkStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  REVOKED
+}
+
+enum PrescriptionStatus {
+  PROCESSING
+  PROCESSED
+  VERIFIED
+  FAILED
+}
+
+enum MealTiming {
+  BEFORE_MEAL
+  AFTER_MEAL
+  WITH_MEAL
+  ANY
+}
+
+enum DoseStatus {
+  PENDING
+  TAKEN
+  MISSED
+  SKIPPED
+}
+
+enum NotificationType {
+  DOSE_REMINDER
+  MISSED_DOSE
+  EXPIRY_ALERT
+  CARE_INVITE
+  PAYMENT
+  SYSTEM
+}
+
+enum AiFeature {
+  PRESCRIPTION_OCR
+  EXPIRY_SCAN
+  MEDICINE_INFO
+  INTERACTION_CHECK
+  HEALTH_CHAT
+  ADHERENCE_INSIGHT
+}
+
+enum ChatRole {
+  USER
+  ASSISTANT
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  CANCELLED
+}
+
+// ───────────────────────────── Identity ─────────────────────────────
+
+model User {
+  id              String     @id @default(cuid())
+  name            String
+  email           String     @unique
+  phone           String?
+  passwordHash    String
+  role            Role       @default(PATIENT)
+  status          UserStatus @default(ACTIVE)
+  isEmailVerified Boolean    @default(false)
+  avatarUrl       String?
+  avatarPublicId  String?
+
+  // Preferences (accessibility for elderly users)
+  language     Language @default(bn)
+  largeFont    Boolean  @default(false)
+  voiceEnabled Boolean  @default(true)
+  timezone     String   @default("Asia/Dhaka")
+  honorific    String? // e.g. "দাদু", "আম্মা" - used in Bangla voice alerts
+
+  // Medical profile (visible to doctors via share link)
+  dateOfBirth       DateTime?
+  gender            String?
+  bloodGroup        String?
+  allergies         String[]  @default([])
+  chronicConditions String[]  @default([])
+  emergencyContact  String?
+
+  // Subscription
+  plan          Plan      @default(FREE)
+  planExpiresAt DateTime?
+
+  // Doctor share link
+  shareToken     String?   @unique
+  shareExpiresAt DateTime?
+
+  // Account security
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
+  lastLoginAt         DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sessions          Session[]
+  otps              OtpToken[]
+  prescriptions     Prescription[]
+  medicines         Medicine[]
+  reminders         Reminder[]
+  doseLogs          DoseLog[]
+  inventory         InventoryItem[]
+  notifications     Notification[]
+  pushSubscriptions PushSubscription[]
+  aiInteractions    AiInteraction[]
+  chatMessages      ChatMessage[]
+  payments          Payment[]
+  patientLinks      CareLink[]         @relation("PatientLinks")
+  caregiverLinks    CareLink[]         @relation("CaregiverLinks")
+  auditLogs         AuditLog[]
+
+  @@index([role])
+  @@index([status])
+}
+
+model Session {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  userAgent String?
+  ip        String?
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model OtpToken {
+  id         String     @id @default(cuid())
+  userId     String
+  purpose    OtpPurpose
+  codeHash   String
+  attempts   Int        @default(0)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime   @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose])
+}
+
+// ───────────────────────────── Care network ─────────────────────────────
+
+model CareLink {
+  id          String         @id @default(cuid())
+  patientId   String
+  caregiverId String?
+  inviteEmail String
+  relation    String? // "Son", "Daughter", "Nurse" ...
+  status      CareLinkStatus @default(PENDING)
+  createdAt   DateTime       @default(now())
+  respondedAt DateTime?
+
+  patient   User  @relation("PatientLinks", fields: [patientId], references: [id], onDelete: Cascade)
+  caregiver User? @relation("CaregiverLinks", fields: [caregiverId], references: [id], onDelete: Cascade)
+
+  @@unique([patientId, inviteEmail])
+  @@index([caregiverId])
+  @@index([inviteEmail])
+}
+
+// ───────────────────────────── Prescriptions & medicines ─────────────────────────────
+
+model Prescription {
+  id             String             @id @default(cuid())
+  patientId      String
+  imageUrl       String
+  imagePublicId  String?
+  title          String?
+  doctorName     String?
+  hospital       String?
+  prescribedDate DateTime?
+  diagnosis      String?
+  advice         String?
+  notes          String?
+  rawText        String?            @db.Text
+  aiSummaryBn    String?            @db.Text
+  aiConfidence   Float?
+  status         PrescriptionStatus @default(PROCESSING)
+  failureReason  String?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  patient   User       @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  medicines Medicine[]
+
+  @@index([patientId, createdAt])
+}
+
+model Medicine {
+  id             String     @id @default(cuid())
+  patientId      String
+  prescriptionId String?
+  name           String
+  genericName    String?
+  strength       String? // "500 mg"
+  form           String? // tablet, capsule, syrup ...
+  dosagePattern  String? // "1+0+1"
+  instructions   String?
+  instructionsBn String?
+  mealTiming     MealTiming @default(ANY)
+  durationDays   Int?
+  startDate      DateTime   @default(now())
+  endDate        DateTime?
+  isActive       Boolean    @default(true)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  patient      User          @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  prescription Prescription? @relation(fields: [prescriptionId], references: [id], onDelete: SetNull)
+  reminders    Reminder[]
+  doseLogs     DoseLog[]
+
+  @@index([patientId, isActive])
+}
+
+model Reminder {
+  id         String   @id @default(cuid())
+  medicineId String
+  patientId  String
+  time       String // "HH:mm" in the patient timezone
+  daysOfWeek Int[]    @default([]) // 0=Sun ... 6=Sat, empty = every day
+  quantity   String   @default("1") // "1", "1/2", "2 tsp"
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  medicine Medicine  @relation(fields: [medicineId], references: [id], onDelete: Cascade)
+  patient  User      @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  doseLogs DoseLog[]
+
+  @@index([patientId, isActive])
+  @@index([time, isActive])
+}
+
+model DoseLog {
+  id                 String     @id @default(cuid())
+  reminderId         String
+  medicineId         String
+  patientId          String
+  scheduledFor       DateTime
+  status             DoseStatus @default(PENDING)
+  takenAt            DateTime?
+  notifiedAt         DateTime?
+  caregiverAlertedAt DateTime?
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  reminder Reminder @relation(fields: [reminderId], references: [id], onDelete: Cascade)
+  medicine Medicine @relation(fields: [medicineId], references: [id], onDelete: Cascade)
+  patient  User     @relation(fields: [patientId], references: [id], onDelete: Cascade)
+
+  @@unique([reminderId, scheduledFor])
+  @@index([patientId, scheduledFor])
+  @@index([status, scheduledFor])
+}
+
+// ───────────────────────────── Home medicine cabinet ─────────────────────────────
+
+model InventoryItem {
+  id                String    @id @default(cuid())
+  patientId         String
+  name              String
+  batchNumber       String?
+  manufactureDate   DateTime?
+  expiryDate        DateTime
+  quantity          Int?
+  imageUrl          String?
+  imagePublicId     String?
+  notes             String?
+  isDisposed        Boolean   @default(false)
+  expiryAlertSentAt DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  patient User @relation(fields: [patientId], references: [id], onDelete: Cascade)
+
+  @@index([patientId, expiryDate])
+  @@index([expiryDate, isDisposed])
+}
+
+// ───────────────────────────── Notifications ─────────────────────────────
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  type      NotificationType
+  title     String
+  message   String
+  speakText String? // Bangla sentence for the Web Speech API
+  data      Json?
+  isRead    Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead, createdAt])
+}
+
+model PushSubscription {
+  id        String   @id @default(cuid())
+  userId    String
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ───────────────────────────── AI ─────────────────────────────
+
+model AiInteraction {
+  id        String    @id @default(cuid())
+  userId    String
+  feature   AiFeature
+  provider  String
+  input     String?   @db.Text
+  output    String?   @db.Text
+  success   Boolean   @default(true)
+  error     String?
+  latencyMs Int?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, feature, createdAt])
+  @@index([createdAt])
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  userId    String
+  role      ChatRole
+  content   String   @db.Text
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+// ───────────────────────────── Billing ─────────────────────────────
+
+model Payment {
+  id              String        @id @default(cuid())
+  userId          String
+  tranId          String        @unique
+  amount          Decimal       @db.Decimal(10, 2)
+  currency        String        @default("BDT")
+  plan            Plan          @default(PREMIUM)
+  months          Int           @default(1)
+  status          PaymentStatus @default(PENDING)
+  valId           String?
+  cardType        String?
+  gatewayResponse Json?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([status])
+}
+
+// ───────────────────────────── Admin ─────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  action     String
+  targetType String?
+  targetId   String?
+  meta       Json?
+  createdAt  DateTime @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+}
