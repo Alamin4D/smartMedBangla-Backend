@@ -11,7 +11,7 @@ import routes from "./routes/index.js";
 export function createApp() {
   const app = express();
 
-  // Behind Render / Railway / Vercel proxies – needed for correct req.ip and secure cookies.
+
   app.set("trust proxy", 1);
 
   app.use(helmet());
